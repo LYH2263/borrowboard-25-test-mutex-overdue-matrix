@@ -11,6 +11,8 @@ def init_db():
       due_date TEXT, lent_at TEXT, returned_at TEXT
     );
     CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
+    CREATE UNIQUE INDEX IF NOT EXISTS loans_one_active_per_item
+      ON loans(item_id) WHERE status='active';
     """)
     if c.execute("SELECT COUNT(*) c FROM items").fetchone()["c"] == 0:
         c.executemany("INSERT INTO items(title,owner,status,data_quality) VALUES (?,?,?,?)", [

@@ -1,4 +1,5 @@
 from datetime import date, datetime, timezone
+import sqlite3
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -59,11 +60,16 @@ def lend(iid: int, body: LendIn):
     check = can_lend(item["status"], active)
     if not check["ok"]:
         c.close(); raise HTTPException(409, check["reason"])
-    cur = c.execute(
-        "INSERT INTO loans(item_id,borrower,status,due_date,lent_at) VALUES (?,?,?,?,?)",
-        (iid, body.borrower, "active", body.due_date, datetime.now(timezone.utc).isoformat()))
-    c.execute("UPDATE items SET status='on_loan' WHERE id=?", (iid,))
-    c.commit(); lid = cur.lastrowid; c.close(); return {"loan_id": lid}
+    try:
+        cur = c.execute(
+            "INSERT INTO loans(item_id,borrower,status,due_date,lent_at) VALUES (?,?,?,?,?)",
+            (iid, body.borrower, "active", body.due_date, datetime.now(timezone.utc).isoformat()))
+        c.execute("UPDATE items SET status='on_loan' WHERE id=?", (iid,))
+        c.commit()
+    except sqlite3.IntegrityError:
+        # 两笔借出同时过了上面的纯函数检查：唯一索引兜底，整单回滚，不允许半成品
+        c.rollback(); c.close(); raise HTTPException(409, "already_on_loan")
+    lid = cur.lastrowid; c.close(); return {"loan_id": lid}
 
 @app.post("/api/loans/{lid}/return")
 def return_loan(lid: int):
