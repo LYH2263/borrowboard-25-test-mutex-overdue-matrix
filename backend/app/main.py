@@ -53,17 +53,31 @@ class LendIn(BaseModel):
 @app.post("/api/items/{iid}/lend")
 def lend(iid: int, body: LendIn):
     c = connect()
-    item = c.execute("SELECT * FROM items WHERE id=?", (iid,)).fetchone()
-    if not item: c.close(); raise HTTPException(404, "item")
-    active = c.execute("SELECT COUNT(*) c FROM loans WHERE item_id=? AND status='active'", (iid,)).fetchone()["c"]
-    check = can_lend(item["status"], active)
-    if not check["ok"]:
-        c.close(); raise HTTPException(409, check["reason"])
-    cur = c.execute(
-        "INSERT INTO loans(item_id,borrower,status,due_date,lent_at) VALUES (?,?,?,?,?)",
-        (iid, body.borrower, "active", body.due_date, datetime.now(timezone.utc).isoformat()))
-    c.execute("UPDATE items SET status='on_loan' WHERE id=?", (iid,))
-    c.commit(); lid = cur.lastrowid; c.close(); return {"loan_id": lid}
+    # 手动事务：BEGIN IMMEDIATE 立即拿写锁，把两笔叠在同一物品上的借出串行化。
+    # 否则默认 deferred 事务下双方都在读阶段看到 available，会写出两笔 active。
+    c.isolation_level = None
+    lid = None
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        item = c.execute("SELECT * FROM items WHERE id=?", (iid,)).fetchone()
+        if not item:
+            c.execute("ROLLBACK")
+            raise HTTPException(404, "item")
+        active = c.execute("SELECT COUNT(*) c FROM loans WHERE item_id=? AND status='active'", (iid,)).fetchone()["c"]
+        check = can_lend(item["status"], active)
+        if not check["ok"]:
+            # 互斥挡住：整单不写，回滚后连一条 loan 都不留。
+            c.execute("ROLLBACK")
+            raise HTTPException(409, check["reason"])
+        cur = c.execute(
+            "INSERT INTO loans(item_id,borrower,status,due_date,lent_at) VALUES (?,?,?,?,?)",
+            (iid, body.borrower, "active", body.due_date, datetime.now(timezone.utc).isoformat()))
+        c.execute("UPDATE items SET status='on_loan' WHERE id=?", (iid,))
+        c.execute("COMMIT")
+        lid = cur.lastrowid
+    finally:
+        c.close()
+    return {"loan_id": lid}
 
 @app.post("/api/loans/{lid}/return")
 def return_loan(lid: int):
